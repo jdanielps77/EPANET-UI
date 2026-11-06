@@ -1,0 +1,118 @@
+name: Build EPANET-UI macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -eux
+          brew update
+          brew install --quiet cmake libomp lazarus
+          which lazarus || true
+          lazarus --version || true
+          which fpc || true
+          fpc -iV || true
+
+      - name: Download required Lazarus packages
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p "$HOME/.lazarus/components"
+          cd /tmp
+
+          BGRA_URL=$(curl -fsSL https://api.github.com/repos/bgrabitmap/bgrabitmap/releases/latest | python3 -c "import sys, json; data=json.load(sys.stdin); print(next(item['browser_download_url'] for item in data['assets'] if item['name'].endswith('.zip')))")
+          curl -L "$BGRA_URL" -o bgra.zip
+          unzip -q -o bgra.zip
+          BGRA_DIR=$(find /tmp -maxdepth 2 -type d -name 'bgrabitmap*' | head -n 1)
+          if [ -n "$BGRA_DIR" ]; then
+            cp -R "$BGRA_DIR" "$HOME/.lazarus/components/"
+          fi
+
+          HTML_URL=$(curl -fsSL https://api.github.com/repos/BerndGabriel/HtmlViewer/releases/latest | python3 -c "import sys, json; data=json.load(sys.stdin); print(next(item['browser_download_url'] for item in data['assets'] if item['name'].endswith('.zip')))")
+          curl -L "$HTML_URL" -o htmlviewer.zip
+          unzip -q -o htmlviewer.zip
+          HTML_DIR=$(find /tmp -maxdepth 2 -type d -name 'HtmlViewer*' | head -n 1)
+          if [ -n "$HTML_DIR" ]; then
+            cp -R "$HTML_DIR" "$HOME/.lazarus/components/"
+          fi
+
+          echo "Lazarus components folder:"
+          ls -la "$HOME/.lazarus/components" || true
+
+      - name: Create bin/mac dir and build required libs
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/bin/mac"
+
+          git clone --depth 1 https://github.com/openwateranalytics/epanet.git /tmp/epanet
+          cmake -S /tmp/epanet -B /tmp/epanet-build -DBUILD_SHARED_LIBS=ON
+          cmake --build /tmp/epanet-build --config Release
+          find /tmp/epanet-build -name 'libepanet*.dylib' -exec cp {} "$GITHUB_WORKSPACE/bin/mac/" \\;
+
+          git clone --depth 1 https://github.com/USEPA/EPANETMSX.git /tmp/epanetmsx
+          cmake -S /tmp/epanetmsx -B /tmp/epanetmsx-build \
+            -DOpenMP_C_FLAGS="-Xclang -fopenmp -I$(brew --prefix libomp)/include" \
+            -DOpenMP_C_LIB_NAMES="libomp" \
+            -DOpenMP_libomp_LIBRARY="$(brew --prefix libomp)/lib/libomp.dylib" \
+            -DEPANET_LIB="$GITHUB_WORKSPACE/bin/mac/libepanet2.dylib"
+          cmake --build /tmp/epanetmsx-build --config Release
+          find /tmp/epanetmsx-build -name 'libepanetmsx*.dylib' -exec cp {} "$GITHUB_WORKSPACE/bin/mac/" \\;
+
+          git clone --depth 1 https://github.com/OSGeo/shapelib.git /tmp/shapelib
+          cmake -S /tmp/shapelib -B /tmp/shapelib-build
+          cmake --build /tmp/shapelib-build --config Release
+          find /tmp/shapelib-build -name 'libshp*.dylib' -exec cp {} "$GITHUB_WORKSPACE/bin/mac/" \\;
+
+          git clone --depth 1 https://github.com/OSGeo/PROJ.git /tmp/proj
+          cmake -S /tmp/proj -B /tmp/proj-build
+          cmake --build /tmp/proj-build --config Release
+          find /tmp/proj-build -name 'libproj*.dylib' -exec cp {} "$GITHUB_WORKSPACE/bin/mac/" \\;
+
+          ls -la "$GITHUB_WORKSPACE/bin/mac" || true
+
+      - name: Build the Lazarus app
+        shell: bash
+        run: |
+          set -eux
+          ls -la
+          if [ ! -f epanet_ui_mac.lpi ]; then
+            echo "Missing epanet_ui_mac.lpi in repository root"
+            exit 1
+          fi
+
+          lazbuild epanet_ui_mac.lpi
+
+          echo "Built artifacts:"
+          find . -maxdepth 3 \( -name 'epanet-ui*' -o -name '*.app' -o -name '*.dylib' \) | sort || true
+
+      - name: Bundle app and collect artifacts
+        shell: bash
+        run: |
+          set -eux
+          if [ -d "bin/mac" ]; then
+            mkdir -p "bin/mac/epanet-ui.app/Contents/Frameworks"
+            cp -f "bin/mac"/*.dylib "bin/mac/epanet-ui.app/Contents/Frameworks/" 2>/dev/null || true
+          fi
+
+          find bin/mac -maxdepth 4 -type f | sort | sed -n '1,200p'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: epanet-ui-macos-build
+          path: |
+            bin/mac/
+          if-no-files-found: error
