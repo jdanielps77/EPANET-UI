@@ -1,4 +1,3 @@
-
 name: Build EPANET-UI macOS Apple Silicon
 
 on:
@@ -31,15 +30,11 @@ jobs:
       LAZARUS_ZIP: "lazarus-darwin-aarch64-4.8.zip"
 
     steps:
-      # --------------------------------------------------
-      # 1. Descargar el repositorio
-      # --------------------------------------------------
+      # 1. Obtener el repositorio
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. Verificar que el runner sea Apple Silicon
-      # --------------------------------------------------
+      # 2. Comprobar que el runner sea Apple Silicon
       - name: Verify runner architecture
         shell: bash
         run: |
@@ -57,9 +52,7 @@ jobs:
           clang --version
           git --version
 
-      # --------------------------------------------------
       # 3. Instalar herramientas y dependencias
-      # --------------------------------------------------
       - name: Install build dependencies
         shell: bash
         run: |
@@ -79,17 +72,13 @@ jobs:
           echo "LIBOMP_PREFIX=$(brew --prefix libomp)" >> "$GITHUB_ENV"
           echo "PROJ_PREFIX=$(brew --prefix proj)" >> "$GITHUB_ENV"
 
-      # --------------------------------------------------
       # 4. Instalar Lazarus oficial para Apple Silicon
-      #    Ya NO se utiliza brew install --cask lazarus
-      # --------------------------------------------------
       - name: Install official Lazarus for Apple Silicon
         shell: bash
         run: |
           set -euxo pipefail
 
           DOWNLOAD_URL="https://download.lazarus-ide.org/Lazarus%20macOS%20aarch64/Lazarus%204.8/${LAZARUS_ZIP}"
-
           INSTALL_DIR="$RUNNER_TEMP/lazarus-${LAZARUS_VERSION}"
 
           mkdir -p "$INSTALL_DIR"
@@ -98,33 +87,32 @@ jobs:
             "$DOWNLOAD_URL" \
             --output "$RUNNER_TEMP/$LAZARUS_ZIP"
 
-          unzip -q "$RUNNER_TEMP/$LAZARUS_ZIP" \
-            -d "$INSTALL_DIR"
+          unzip -q "$RUNNER_TEMP/$LAZARUS_ZIP" -d "$INSTALL_DIR"
 
           LAZBUILD_PATH="$(find "$INSTALL_DIR" \
             -type f -name lazbuild -perm -111 -print -quit)"
 
-          FPC_PATH="$(command -v fpc || true)"
-
           if [[ -z "$LAZBUILD_PATH" ]]; then
-            echo "::error::No se encontró lazbuild."
-            find "$INSTALL_DIR" -maxdepth 5 -print
-            exit 1
-          fi
-
-          if [[ -z "$FPC_PATH" ]]; then
-            echo "::error::No se encontró Free Pascal."
+            echo "::error::No se encontró lazbuild en el archivo de Lazarus."
+            find "$INSTALL_DIR" -maxdepth 6 -print
             exit 1
           fi
 
           LAZARUS_DIR="$(dirname "$LAZBUILD_PATH")"
+          FPC_PATH="$(command -v fpc || true)"
+
+          if [[ -z "$FPC_PATH" ]]; then
+            echo "::error::No se encontró Free Pascal (fpc)."
+            exit 1
+          fi
 
           echo "LAZARUS_DIR=$LAZARUS_DIR" >> "$GITHUB_ENV"
+          echo "LAZBUILD_PATH=$LAZBUILD_PATH" >> "$GITHUB_ENV"
           echo "$LAZARUS_DIR" >> "$GITHUB_PATH"
 
           echo "=== Lazarus ==="
           file "$LAZBUILD_PATH"
-          "$LAZBUILD_PATH" --version
+          "$LAZBUILD_PATH" --lazarusdir="$LAZARUS_DIR" --version
 
           echo "=== Free Pascal ==="
           fpc -iV
@@ -135,30 +123,46 @@ jobs:
             exit 1
           fi
 
-      # --------------------------------------------------
-      # 5. Instalar componentes Lazarus
-      # --------------------------------------------------
+      # 5. Instalar y compilar paquetes Lazarus
       - name: Install Lazarus dependency packages
         shell: bash
         run: |
           set -euxo pipefail
 
           COMPONENTS="$RUNNER_TEMP/lazarus-components"
+          LAZARUS_CONFIG="$HOME/.lazarus"
 
-          mkdir -p "$COMPONENTS"
+          mkdir -p "$COMPONENTS" "$LAZARUS_CONFIG"
 
+          echo "Lazarus directory: $LAZARUS_DIR"
+          echo "Lazbuild executable: $LAZBUILD_PATH"
+
+          if [[ ! -d "$LAZARUS_DIR" ]]; then
+            echo "::error::No existe el directorio de Lazarus: $LAZARUS_DIR"
+            exit 1
+          fi
+
+          if [[ ! -x "$LAZBUILD_PATH" ]]; then
+            echo "::error::No se puede ejecutar lazbuild: $LAZBUILD_PATH"
+            exit 1
+          fi
+
+          # BGRA Bitmap Pack
           git clone --depth 1 --branch v11.6.6 \
             https://github.com/bgrabitmap/bgrabitmap.git \
             "$COMPONENTS/BGRA"
 
+          # HtmlViewer
           git clone --depth 1 --branch 11.10 \
             https://github.com/BerndGabriel/HtmlViewer.git \
             "$COMPONENTS/HtmlViewer"
 
+          # LazMapViewer
           git clone --depth 1 \
             https://github.com/andreaspeters/LazMapViewer.git \
             "$COMPONENTS/LazMapViewer"
 
+          # Localizar archivos .lpk
           BGRA_LPK="$(find "$COMPONENTS/BGRA" \
             -name '*.lpk' -print | head -n 1)"
 
@@ -176,29 +180,43 @@ jobs:
             fi
           done
 
-          mkdir -p "$HOME/.lazarus"
+          # Registrar y compilar cada paquete con el directorio correcto.
+          # --lazarusdir evita que lazbuild busque /Developer/lazarus.
+          # --pcp fija un directorio de configuración para este runner.
+          echo "=== Verificando lazbuild ==="
+          "$LAZBUILD_PATH" \
+            --lazarusdir="$LAZARUS_DIR" \
+            --pcp="$LAZARUS_CONFIG" \
+            --version
 
-          lazbuild --version
+          echo "=== Compilando BGRA ==="
+          "$LAZBUILD_PATH" \
+            --lazarusdir="$LAZARUS_DIR" \
+            --pcp="$LAZARUS_CONFIG" \
+            "$BGRA_LPK"
 
-          echo "Compilando BGRA..."
-          lazbuild "$BGRA_LPK"
+          echo "=== Compilando HtmlViewer ==="
+          "$LAZBUILD_PATH" \
+            --lazarusdir="$LAZARUS_DIR" \
+            --pcp="$LAZARUS_CONFIG" \
+            "$HTML_LPK"
 
-          echo "Compilando HtmlViewer..."
-          lazbuild "$HTML_LPK"
+          echo "=== Compilando LazMapViewer ==="
+          "$LAZBUILD_PATH" \
+            --lazarusdir="$LAZARUS_DIR" \
+            --pcp="$LAZARUS_CONFIG" \
+            "$MAP_LPK"
 
-          echo "Compilando LazMapViewer..."
-          lazbuild "$MAP_LPK"
+          echo "=== Paquetes Lazarus localizados y compilados ==="
+          printf '%s\n' "$BGRA_LPK" "$HTML_LPK" "$MAP_LPK"
 
-      # --------------------------------------------------
       # 6. Compilar bibliotecas nativas
-      # --------------------------------------------------
       - name: Build native libraries for macOS ARM64
         shell: bash
         run: |
           set -euxo pipefail
 
           DEPS="$RUNNER_TEMP/native-deps"
-
           mkdir -p "$DEPS/src" "$DEPS/lib"
 
           # EPANET
@@ -220,16 +238,19 @@ jobs:
             -type f -name 'libepanet*.dylib' \
             -exec cp -v {} "$DEPS/lib/" \;
 
-          test -n "$(find "$DEPS/lib" \
+          EPANET_DYLIB="$(find "$DEPS/lib" \
             -name 'libepanet*.dylib' -print -quit)"
+
+          if [[ -z "$EPANET_DYLIB" ]]; then
+            echo "::error::No se generó libepanet*.dylib."
+            find "$DEPS/build-epanet" -type f -maxdepth 5 -print
+            exit 1
+          fi
 
           # EPANET-MSX
           git clone --depth 1 \
             https://github.com/USEPA/EPANETMSX.git \
             "$DEPS/src/epanetmsx"
-
-          EPANET_LIB="$(find "$DEPS/lib" \
-            -name 'libepanet*.dylib' -print -quit)"
 
           cmake -S "$DEPS/src/epanetmsx" \
             -B "$DEPS/build-msx" \
@@ -238,7 +259,7 @@ jobs:
             -DOpenMP_C_FLAGS="-Xclang -fopenmp -I${LIBOMP_PREFIX}/include" \
             -DOpenMP_C_LIB_NAMES=omp \
             -DOpenMP_omp_LIBRARY="${LIBOMP_PREFIX}/lib/libomp.dylib" \
-            -DEPANET_LIB="$EPANET_LIB"
+            -DEPANET_LIB="$EPANET_DYLIB"
 
           cmake --build "$DEPS/build-msx" \
             --config Release --parallel
@@ -247,8 +268,14 @@ jobs:
             -type f -name 'libepanetmsx*.dylib' \
             -exec cp -v {} "$DEPS/lib/" \;
 
-          test -n "$(find "$DEPS/lib" \
+          MSX_DYLIB="$(find "$DEPS/lib" \
             -name 'libepanetmsx*.dylib' -print -quit)"
+
+          if [[ -z "$MSX_DYLIB" ]]; then
+            echo "::error::No se generó libepanetmsx*.dylib."
+            find "$DEPS/build-msx" -type f -maxdepth 5 -print
+            exit 1
+          fi
 
           # ShapeLib
           git clone --depth 1 \
@@ -268,44 +295,50 @@ jobs:
             -type f -name 'libshp*.dylib' \
             -exec cp -v {} "$DEPS/lib/" \;
 
-          test -n "$(find "$DEPS/lib" \
+          SHP_DYLIB="$(find "$DEPS/lib" \
             -name 'libshp*.dylib' -print -quit)"
 
-          # PROJ
+          if [[ -z "$SHP_DYLIB" ]]; then
+            echo "::error::No se generó libshp*.dylib."
+            find "$DEPS/build-shapelib" -type f -maxdepth 5 -print
+            exit 1
+          fi
+
+          # PROJ (instalado por Homebrew)
           find "$PROJ_PREFIX/lib" \
             -maxdepth 1 -type f -name 'libproj*.dylib' \
             -exec cp -v {} "$DEPS/lib/" \;
 
-          test -n "$(find "$DEPS/lib" \
+          PROJ_DYLIB="$(find "$DEPS/lib" \
             -name 'libproj*.dylib' -print -quit)"
 
+          if [[ -z "$PROJ_DYLIB" ]]; then
+            echo "::error::No se encontró libproj*.dylib."
+            exit 1
+          fi
+
           # OpenMP
-          cp -v "${LIBOMP_PREFIX}/lib/libomp.dylib" \
-            "$DEPS/lib/"
+          cp -v "${LIBOMP_PREFIX}/lib/libomp.dylib" "$DEPS/lib/"
 
-          # Copiar bibliotecas al proyecto
+          # Preparar las bibliotecas para el proyecto
           mkdir -p bin/mac
-
           cp -v "$DEPS/lib/"*.dylib bin/mac/
 
           echo "=== Bibliotecas nativas ==="
           ls -lah bin/mac
 
-          # Verificar arquitectura ARM64
+          # Comprobar arquitectura de cada biblioteca
           for LIBRARY in bin/mac/*.dylib; do
             echo "Verificando: $LIBRARY"
-
             file "$LIBRARY"
 
-            lipo -archs "$LIBRARY" | grep -q arm64 || {
+            if ! lipo -archs "$LIBRARY" | grep -q arm64; then
               echo "::error::Biblioteca incompatible con ARM64: $LIBRARY"
               exit 1
-            }
+            fi
           done
 
-      # --------------------------------------------------
       # 7. Compilar EPANET-UI
-      # --------------------------------------------------
       - name: Build EPANET-UI project
         shell: bash
         run: |
@@ -314,11 +347,16 @@ jobs:
           test -f epanet_ui_mac.lpi
           test -f epanet_ui_mac.lpr
 
-          lazbuild --build-all --ws=cocoa epanet_ui_mac.lpi
+          "$LAZBUILD_PATH" \
+            --lazarusdir="$LAZARUS_DIR" \
+            --pcp="$HOME/.lazarus" \
+            --build-all \
+            --ws=cocoa \
+            epanet_ui_mac.lpi
 
           echo "=== Archivos generados ==="
 
-          find . -maxdepth 5 \
+          find . -maxdepth 6 \
             \( -name '*.app' -o \
                -name 'epanet-ui*' -o \
                -name '*.dylib' \) \
@@ -329,53 +367,54 @@ jobs:
             exit 1
           fi
 
-      # --------------------------------------------------
-      # 8. Verificar ejecutables y bibliotecas
-      # --------------------------------------------------
+      # 8. Verificar ejecutable y bibliotecas
       - name: Verify executable and dynamic libraries
         shell: bash
         run: |
           set -euxo pipefail
 
           echo "=== Inventario de bibliotecas ==="
-
-          find bin/mac -maxdepth 1 \
-            -type f -name '*.dylib' -print
+          find bin/mac -maxdepth 1 -type f -name '*.dylib' -print
 
           echo "=== Ejecutables ==="
-
-          find bin/mac -maxdepth 4 \
-            -type f -perm -111 -print || true
+          find bin/mac -maxdepth 5 -type f -perm -111 -print || true
 
           while IFS= read -r LIBRARY; do
             echo "Dependencias de $LIBRARY"
-
             file "$LIBRARY"
             lipo -archs "$LIBRARY"
             otool -L "$LIBRARY"
+          done < <(find bin/mac -maxdepth 1 -type f -name '*.dylib' -print)
 
-          done < <(find bin/mac -maxdepth 1 \
-            -type f -name '*.dylib' -print)
-
-          APP="$(find bin/mac -maxdepth 3 \
+          APP="$(find bin/mac -maxdepth 5 \
             -type d -name '*.app' -print -quit)"
 
           if [[ -n "$APP" ]]; then
             echo "Aplicación encontrada: $APP"
-            find "$APP" -maxdepth 4 -type f -print
+            find "$APP" -maxdepth 5 -type f -print
           else
             echo "::warning::No se encontró un bundle .app. Revisar la salida de Lazarus."
           fi
 
-      # --------------------------------------------------
-      # 9. Subir artefactos
-      # --------------------------------------------------
-      - name: Upload build artifact
+      # 9. Subir informes aunque falle la compilación
+      - name: Upload diagnostic logs
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epanet-ui-macos-arm64-diagnostics
+          path: |
+            ${{ runner.temp }}/lazarus-components/
+            ${{ runner.temp }}/native-deps/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # 10. Subir el resultado solamente si el build fue exitoso
+      - name: Upload build artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: epanet-ui-macos-arm64-build
           path: |
             bin/mac/
-          if-no-files-found: warn
-          retention-days: 14
+          if-no-files-found: error
+          retention-days: 30
