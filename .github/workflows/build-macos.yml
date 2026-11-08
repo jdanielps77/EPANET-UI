@@ -10,6 +10,7 @@ on:
       - ".github/workflows/build-macos.yml"
       - "epanet_ui_mac.lpi"
       - "epanet_ui_mac.lpr"
+      - "src/**"
 
 permissions:
   contents: read
@@ -30,19 +31,20 @@ jobs:
       LAZARUS_VERSION: "4.8"
       LAZARUS_ZIP: "lazarus-darwin-aarch64-4.8.zip"
       FPC_DMG: "fpc-3.2.4rc1a.intelarm64-macosx.dmg"
+      PROJ_VERSION: "7.2.1"
 
     steps:
 
-      # ================================================
-      # 1. DESCARGAR REPOSITORIO
-      # ================================================
+      # ==========================================
+      # 1. DESCARGAR EL REPOSITORIO
+      # ==========================================
 
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ================================================
+      # ==========================================
       # 2. VERIFICAR APPLE SILICON
-      # ================================================
+      # ==========================================
 
       - name: Verify Apple Silicon runner
         shell: bash
@@ -56,34 +58,45 @@ jobs:
             exit 1
           fi
 
-          xcode-select -p
           clang --version
           git --version
+          xcode-select -p
 
-      # ================================================
-      # 3. INSTALAR DEPENDENCIAS NATIVAS
-      # ================================================
+      # ==========================================
+      # 3. INSTALAR DEPENDENCIAS
+      # ==========================================
 
-      - name: Install native build dependencies
+      - name: Install native dependencies
         shell: bash
         run: |
           set -euxo pipefail
 
-          brew install cmake libomp proj pkg-config
+          # No instalar PROJ desde Homebrew.
+          # Se compilará PROJ 7.2.1 desde sus fuentes.
+
+          brew install cmake libomp pkg-config sqlite
 
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
           echo "LIBOMP_PREFIX=$(brew --prefix libomp)" >> "$GITHUB_ENV"
-          echo "PROJ_PREFIX=$(brew --prefix proj)" >> "$GITHUB_ENV"
+          echo "SQLITE_PREFIX=$(brew --prefix sqlite)" >> "$GITHUB_ENV"
 
           cmake --version
-          pkg-config --version
+          clang --version
 
-      # ================================================
+          SQLITE_PREFIX="$(brew --prefix sqlite)"
+
+          test -f "$SQLITE_PREFIX/include/sqlite3.h"
+          test -f "$SQLITE_PREFIX/lib/libsqlite3.dylib"
+          test -x "$SQLITE_PREFIX/bin/sqlite3"
+
+          "$SQLITE_PREFIX/bin/sqlite3" --version
+
+      # ==========================================
       # 4. INSTALAR FREE PASCAL ARM64
-      # ================================================
+      # ==========================================
 
-      - name: Install official Free Pascal ARM64
+      - name: Install Free Pascal ARM64
         shell: bash
         run: |
           set -euxo pipefail
@@ -109,7 +122,7 @@ jobs:
             -type f -name '*.pkg' -print -quit)"
 
           if [[ -z "$FPC_PKG" ]]; then
-            echo "::error::No se encontró el instalador PKG de FPC."
+            echo "::error::No se encontró el instalador FPC."
             find "$MOUNT_POINT" -maxdepth 4 -print
             exit 1
           fi
@@ -122,8 +135,6 @@ jobs:
 
           if [[ -z "$FPC_BIN" ]]; then
             echo "::error::No se encontró FPC."
-            find /usr/local /opt/homebrew \
-              -type f -name fpc -print 2>/dev/null || true
             exit 1
           fi
 
@@ -132,7 +143,7 @@ jobs:
             -print -quit 2>/dev/null || true)"
 
           if [[ -z "$PPCA64" ]]; then
-            echo "::error::No se encontró el compilador ppca64."
+            echo "::error::No se encontró ppca64."
             find /usr/local/lib /usr/local/bin \
               -iname '*ppca64*' -print 2>/dev/null || true
             exit 1
@@ -141,19 +152,16 @@ jobs:
           echo "FPC_BIN=$FPC_BIN" >> "$GITHUB_ENV"
           echo "PPCA64=$PPCA64" >> "$GITHUB_ENV"
 
-          echo "=== Free Pascal ==="
           "$FPC_BIN" -iV
           "$FPC_BIN" -iTP
 
-          file "$FPC_BIN"
-
           test "$("$FPC_BIN" -iTP)" = "aarch64"
 
-      # ================================================
-      # 5. INSTALAR LAZARUS 4.8 ARM64
-      # ================================================
+      # ==========================================
+      # 5. INSTALAR LAZARUS ARM64
+      # ==========================================
 
-      - name: Install official Lazarus for Apple Silicon
+      - name: Install Lazarus
         shell: bash
         run: |
           set -euxo pipefail
@@ -167,8 +175,6 @@ jobs:
           curl --fail --location --retry 4 \
             "$DOWNLOAD_URL" \
             --output "$RUNNER_TEMP/$LAZARUS_ZIP"
-
-          xattr -c "$RUNNER_TEMP/$LAZARUS_ZIP" || true
 
           unzip -q "$RUNNER_TEMP/$LAZARUS_ZIP" \
             -d "$INSTALL_DIR"
@@ -199,14 +205,11 @@ jobs:
             --lazarusdir="$LAZARUS_DIR" \
             --version
 
-          "$FPC_BIN" -iV
-          "$PPCA64" -iV
+      # ==========================================
+      # 6. INSTALAR PAQUETES LAZARUS
+      # ==========================================
 
-      # ================================================
-      # 6. INSTALAR COMPONENTES LAZARUS
-      # ================================================
-
-      - name: Install Lazarus dependency packages
+      - name: Install Lazarus packages
         shell: bash
         run: |
           set -euxo pipefail
@@ -216,22 +219,18 @@ jobs:
 
           mkdir -p "$COMPONENTS" "$LAZARUS_CONFIG"
 
-          # BGRA Bitmap Pack
           git clone --depth 1 --branch v11.6.6 \
             https://github.com/bgrabitmap/bgrabitmap.git \
             "$COMPONENTS/BGRA"
 
-          # HtmlViewer
           git clone --depth 1 --branch 11.10 \
             https://github.com/BerndGabriel/HtmlViewer.git \
             "$COMPONENTS/HtmlViewer"
 
-          # LazMapViewer
           git clone --depth 1 \
             https://github.com/andreaspeters/LazMapViewer.git \
             "$COMPONENTS/LazMapViewer"
 
-          # Localizar paquetes
           BGRA_BITMAP_LPK="$(find "$COMPONENTS/BGRA" \
             -iname 'bgrabitmappack.lpk' -print -quit)"
 
@@ -263,42 +262,60 @@ jobs:
             "--compiler=$FPC_BIN"
           )
 
-          echo "=== Compilando BGRABitmapPack ==="
+          echo "Compilando BGRABitmapPack"
 
           "$LAZBUILD_PATH" \
             "${LAZBUILD_ARGS[@]}" \
             "$BGRA_BITMAP_LPK"
 
-          echo "=== Compilando BGControls ==="
+          echo "Compilando BGControls"
 
           "$LAZBUILD_PATH" \
             "${LAZBUILD_ARGS[@]}" \
             "$BGRA_CONTROLS_LPK"
 
-          echo "=== Compilando HtmlViewer ==="
+          echo "Compilando HtmlViewer"
 
           "$LAZBUILD_PATH" \
             "${LAZBUILD_ARGS[@]}" \
             "$HTML_LPK"
 
-          echo "=== Compilando LazMapViewer ==="
+          echo "Compilando LazMapViewer"
 
           "$LAZBUILD_PATH" \
             "${LAZBUILD_ARGS[@]}" \
             "$MAP_LPK"
 
-      # ================================================
-      # 7. COMPILAR EPANET
-      # ================================================
+      # ==========================================
+      # 7. CREAR DIRECTORIOS
+      # ==========================================
 
-      - name: Build EPANET native library
+      - name: Prepare native build directories
         shell: bash
         run: |
           set -euxo pipefail
 
           DEPS="$RUNNER_TEMP/native-deps"
 
-          mkdir -p "$DEPS/src" "$DEPS/lib" bin/mac
+          mkdir -p \
+            "$DEPS/src" \
+            "$DEPS/lib" \
+            "$DEPS/build-epanet" \
+            "$DEPS/build-msx" \
+            "$DEPS/build-shapelib" \
+            "$DEPS/build-proj" \
+            bin/mac
+
+      # ==========================================
+      # 8. COMPILAR EPANET
+      # ==========================================
+
+      - name: Build EPANET
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          DEPS="$RUNNER_TEMP/native-deps"
 
           git clone --depth 1 \
             https://github.com/OpenWaterAnalytics/EPANET.git \
@@ -317,36 +334,32 @@ jobs:
             --parallel
 
           find "$DEPS/build-epanet" \
-            -name 'libepanet*.dylib' \
+            -type f -name 'libepanet*.dylib' \
             -exec cp -v {} "$DEPS/lib/" \;
 
           EPANET_DYLIB="$(find "$DEPS/lib" \
             -name 'libepanet*.dylib' -print -quit)"
 
           if [[ -z "$EPANET_DYLIB" ]]; then
-            echo "::error::No se generó la biblioteca EPANET."
+            echo "::error::No se generó libepanet."
             find "$DEPS/build-epanet" -type f -print
             exit 1
           fi
 
-          echo "EPANET compilado: $EPANET_DYLIB"
-
           file "$EPANET_DYLIB"
-          lipo -archs "$EPANET_DYLIB"
+          lipo -archs "$EPANET_DYLIB" | grep -q arm64
 
-      # ================================================
-      # 8. DESCARGAR EPANET-MSX CON SUBMODULOS
-      # ================================================
+      # ==========================================
+      # 9. DESCARGAR EPANET-MSX Y SUBMODULOS
+      # ==========================================
 
-      - name: Download EPANET-MSX with submodules
+      - name: Download EPANET-MSX
         shell: bash
         run: |
           set -euxo pipefail
 
           DEPS="$RUNNER_TEMP/native-deps"
           MSX_SOURCE="$DEPS/src/epanetmsx"
-
-          echo "=== Descargando EPANET-MSX ==="
 
           git clone \
             --depth 1 \
@@ -357,15 +370,10 @@ jobs:
 
           cd "$MSX_SOURCE"
 
-          echo "=== Estado de los submodulos ==="
-
           git submodule status
-
-          echo "=== Verificando EPANET2.2 ==="
 
           if [[ ! -d "EPANET2.2/SRC_engines" ]]; then
             echo "::error::No existe EPANET2.2/SRC_engines."
-            echo "Estado de los submodulos:"
             git submodule status
             find . -maxdepth 4 -type d -print
             exit 1
@@ -373,30 +381,24 @@ jobs:
 
           if [[ ! -f "EPANET2.2/SRC_engines/CMakeLists.txt" ]]; then
             echo "::error::Falta CMakeLists.txt de SRC_engines."
-            find EPANET2.2 -maxdepth 4 -name CMakeLists.txt -print
             exit 1
           fi
 
-          echo "Submodulo EPANET2.2 encontrado."
+          echo "Submodulo EPANET2.2 verificado."
 
-          cd "$GITHUB_WORKSPACE"
+      # ==========================================
+      # 10. COMPILAR EPANET-MSX
+      # ==========================================
 
-      # ================================================
-      # 9. COMPILAR EPANET-MSX
-      # ================================================
-
-      - name: Build EPANET-MSX native library
+      - name: Build EPANET-MSX
         shell: bash
         run: |
           set -euxo pipefail
 
           DEPS="$RUNNER_TEMP/native-deps"
-          MSX_SOURCE="$DEPS/src/epanetmsx"
-
-          echo "=== Configurando EPANET-MSX ==="
 
           cmake \
-            -S "$MSX_SOURCE" \
+            -S "$DEPS/src/epanetmsx" \
             -B "$DEPS/build-msx" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
@@ -405,16 +407,13 @@ jobs:
             -DOpenMP_C_LIB_NAMES=omp \
             -DOpenMP_omp_LIBRARY="${LIBOMP_PREFIX}/lib/libomp.dylib"
 
-          echo "=== Compilando EPANET-MSX ==="
-
           cmake --build "$DEPS/build-msx" \
             --config Release \
             --parallel
 
-          echo "=== Buscando biblioteca MSX ==="
-
           MSX_DYLIB="$(find "$DEPS/build-msx" \
-            -name 'libepanetmsx*.dylib' -print -quit)"
+            -type f -name 'libepanetmsx*.dylib' \
+            -print -quit)"
 
           if [[ -z "$MSX_DYLIB" ]]; then
             echo "::error::No se generó libepanetmsx.dylib."
@@ -424,14 +423,13 @@ jobs:
 
           cp -v "$MSX_DYLIB" "$DEPS/lib/"
 
-          echo "EPANET-MSX compilado: $MSX_DYLIB"
-
           file "$DEPS/lib/$(basename "$MSX_DYLIB")"
-          lipo -archs "$DEPS/lib/$(basename "$MSX_DYLIB")"
+          lipo -archs "$DEPS/lib/$(basename "$MSX_DYLIB")" \
+            | grep -q arm64
 
-      # ================================================
-      # 10. COMPILAR SHAPELIB
-      # ================================================
+      # ==========================================
+      # 11. COMPILAR SHAPELIB
+      # ==========================================
 
       - name: Build ShapeLib
         shell: bash
@@ -456,10 +454,11 @@ jobs:
             --parallel
 
           SHP_DYLIB="$(find "$DEPS/build-shapelib" \
-            -name 'libshp*.dylib' -print -quit)"
+            -type f -name 'libshp*.dylib' \
+            -print -quit)"
 
           if [[ -z "$SHP_DYLIB" ]]; then
-            echo "::error::No se generó la biblioteca ShapeLib."
+            echo "::error::No se generó libshp.dylib."
             find "$DEPS/build-shapelib" -type f -print
             exit 1
           fi
@@ -467,48 +466,155 @@ jobs:
           cp -v "$SHP_DYLIB" "$DEPS/lib/"
 
           file "$DEPS/lib/$(basename "$SHP_DYLIB")"
-          lipo -archs "$DEPS/lib/$(basename "$SHP_DYLIB")"
+          lipo -archs "$DEPS/lib/$(basename "$SHP_DYLIB")" \
+            | grep -q arm64
 
-      # ================================================
-      # 11. PREPARAR PROJ Y OPENMP
-      # ================================================
+      # ==========================================
+      # 12. COMPILAR PROJ 7.2.1
+      # ==========================================
 
-      - name: Prepare PROJ and OpenMP libraries
+      - name: Build PROJ 7.2.1 ARM64
         shell: bash
         run: |
           set -euxo pipefail
 
           DEPS="$RUNNER_TEMP/native-deps"
 
-          PROJ_DYLIB="$PROJ_PREFIX/lib/libproj.dylib"
-          OMP_DYLIB="$LIBOMP_PREFIX/lib/libomp.dylib"
+          PROJ_SOURCE="$DEPS/src/proj-$PROJ_VERSION"
+          PROJ_BUILD="$DEPS/build-proj"
+          PROJ_INSTALL="$DEPS/proj-install"
 
-          if [[ ! -e "$PROJ_DYLIB" ]]; then
-            echo "::error::No se encontró libproj.dylib."
-            ls -lah "$PROJ_PREFIX/lib"
+          SQLITE_PREFIX="$SQLITE_PREFIX"
+
+          echo "======================================"
+          echo "DESCARGANDO PROJ $PROJ_VERSION"
+          echo "======================================"
+
+          curl --fail --location --retry 4 \
+            "https://download.osgeo.org/proj/proj-${PROJ_VERSION}.tar.gz" \
+            --output "$RUNNER_TEMP/proj-${PROJ_VERSION}.tar.gz"
+
+          tar -xzf "$RUNNER_TEMP/proj-${PROJ_VERSION}.tar.gz" \
+            -C "$DEPS/src"
+
+          test -f "$PROJ_SOURCE/CMakeLists.txt"
+
+          echo "======================================"
+          echo "CONFIGURANDO PROJ ARM64"
+          echo "======================================"
+
+          cmake \
+            -S "$PROJ_SOURCE" \
+            -B "$PROJ_BUILD" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$PROJ_INSTALL" \
+            -DCMAKE_PREFIX_PATH="$SQLITE_PREFIX" \
+            -DSQLITE3_INCLUDE_DIR="$SQLITE_PREFIX/include" \
+            -DSQLITE3_LIBRARY="$SQLITE_PREFIX/lib/libsqlite3.dylib" \
+            -DENABLE_TIFF=OFF \
+            -DENABLE_CURL=OFF \
+            -DBUILD_PROJSYNC=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=ON
+
+          echo "======================================"
+          echo "COMPILANDO PROJ"
+          echo "======================================"
+
+          cmake --build "$PROJ_BUILD" \
+            --config Release \
+            --parallel
+
+          echo "======================================"
+          echo "INSTALANDO PROJ"
+          echo "======================================"
+
+          cmake --install "$PROJ_BUILD" \
+            --config Release
+
+          echo "======================================"
+          echo "LOCALIZANDO LIBPROJ"
+          echo "======================================"
+
+          PROJ_DYLIB="$(find "$PROJ_INSTALL/lib" \
+            -name 'libproj*.dylib' \
+            -type f -print -quit)"
+
+          if [[ -z "$PROJ_DYLIB" ]]; then
+            echo "::error::No se generó la biblioteca PROJ."
+            find "$PROJ_INSTALL" -type f -print
             exit 1
           fi
 
-          if [[ ! -e "$OMP_DYLIB" ]]; then
-            echo "::error::No se encontró libomp.dylib."
-            ls -lah "$LIBOMP_PREFIX/lib"
-            exit 1
-          fi
+          echo "Biblioteca encontrada: $PROJ_DYLIB"
 
-          cp -Lv "$PROJ_DYLIB" "$DEPS/lib/"
-          cp -Lv "$OMP_DYLIB" "$DEPS/lib/"
+          echo "======================================"
+          echo "VERIFICANDO API ANTIGUA"
+          echo "======================================"
 
-          echo "=== Bibliotecas disponibles ==="
+          nm -gU "$PROJ_DYLIB" > "$RUNNER_TEMP/proj-symbols.txt"
 
-          ls -lah "$DEPS/lib"
+          cat "$RUNNER_TEMP/proj-symbols.txt" \
+            | grep -E '_pj_(init_plus|transform|is_latlong|free)$'
 
-          # Copiar bibliotecas al directorio del proyecto
+          for SYMBOL in \
+            _pj_init_plus \
+            _pj_transform \
+            _pj_is_latlong \
+            _pj_free; do
+
+            if ! grep -q "$SYMBOL" "$RUNNER_TEMP/proj-symbols.txt"; then
+              echo "::error::PROJ no exporta el símbolo $SYMBOL."
+              exit 1
+            fi
+          done
+
+          echo "======================================"
+          echo "VERIFICANDO ARQUITECTURA"
+          echo "======================================"
+
+          file "$PROJ_DYLIB"
+
+          lipo -archs "$PROJ_DYLIB" | grep -q arm64
+
+          cp -L "$PROJ_DYLIB" "$DEPS/lib/libproj.dylib"
+
+          echo "PROJ_INSTALL=$PROJ_INSTALL" >> "$GITHUB_ENV"
+
+          echo "PROJ 7.2.1 compilado y verificado."
+
+      # ==========================================
+      # 13. PREPARAR BIBLIOTECAS
+      # ==========================================
+
+      - name: Prepare native libraries
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          DEPS="$RUNNER_TEMP/native-deps"
+
+          cp -Lv "$LIBOMP_PREFIX/lib/libomp.dylib" \
+            "$DEPS/lib/libomp.dylib"
+
+          mkdir -p bin/mac
+
           cp -Lv "$DEPS/lib/"*.dylib bin/mac/
 
-          echo "=== Verificar arquitectura ARM64 ==="
+          echo "======================================"
+          echo "BIBLIOTECAS DISPONIBLES"
+          echo "======================================"
+
+          ls -lah bin/mac
+
+          echo "======================================"
+          echo "VERIFICAR ARM64"
+          echo "======================================"
 
           for LIBRARY in bin/mac/*.dylib; do
-            echo "Verificando: $LIBRARY"
+
+            echo "Verificando $LIBRARY"
 
             file "$LIBRARY"
 
@@ -518,9 +624,16 @@ jobs:
             }
           done
 
-      # ================================================
-      # 12. COMPILAR INTERFAZ EPANET-UI
-      # ================================================
+          echo "======================================"
+          echo "VERIFICAR SIMBOLOS PROJ"
+          echo "======================================"
+
+          nm -gU bin/mac/libproj.dylib \
+            | grep -E '_pj_(init_plus|transform|is_latlong|free)$'
+
+      # ==========================================
+      # 14. COMPILAR EPANET-UI
+      # ==========================================
 
       - name: Build EPANET-UI project
         shell: bash
@@ -530,6 +643,10 @@ jobs:
           test -f epanet_ui_mac.lpi
           test -f epanet_ui_mac.lpr
 
+          echo "======================================"
+          echo "COMPILANDO EPANET-UI"
+          echo "======================================"
+
           "$LAZBUILD_PATH" \
             --lazarusdir="$LAZARUS_DIR" \
             --pcp="$HOME/.lazarus" \
@@ -538,7 +655,9 @@ jobs:
             --ws=cocoa \
             epanet_ui_mac.lpi
 
-          echo "=== Archivos generados ==="
+          echo "======================================"
+          echo "RESULTADOS"
+          echo "======================================"
 
           find . -maxdepth 8 \
             \( -name '*.app' -o \
@@ -546,11 +665,11 @@ jobs:
                -name '*.dylib' \) \
             -print | sort
 
-      # ================================================
-      # 13. VERIFICAR APLICACION
-      # ================================================
+      # ==========================================
+      # 15. VERIFICAR APLICACION
+      # ==========================================
 
-      - name: Verify application and libraries
+      - name: Verify application
         shell: bash
         run: |
           set -euxo pipefail
@@ -577,30 +696,28 @@ jobs:
           EXECUTABLE="$APP/Contents/MacOS/$APP_EXECUTABLE"
 
           if [[ ! -f "$EXECUTABLE" ]]; then
-            echo "::error::No se encontró el ejecutable principal."
+            echo "::error::No existe el ejecutable principal."
             find "$APP" -maxdepth 5 -print
             exit 1
           fi
-
-          echo "=== Ejecutable ==="
 
           file "$EXECUTABLE"
 
           lipo -archs "$EXECUTABLE" | grep -q arm64
 
-          echo "=== Dependencias dinámicas ==="
+          echo "=== Dependencias del ejecutable ==="
 
           otool -L "$EXECUTABLE"
 
-          echo "=== Bundle ==="
+          echo "=== Bundle generado ==="
 
           find "$APP" -maxdepth 5 -print
 
           echo "APP_PATH=$APP" >> "$GITHUB_ENV"
 
-      # ================================================
-      # 14. EMPAQUETAR APLICACION
-      # ================================================
+      # ==========================================
+      # 16. EMPAQUETAR APLICACION
+      # ==========================================
 
       - name: Package macOS application
         shell: bash
@@ -621,24 +738,25 @@ jobs:
 
           ls -lah dist
 
-      # ================================================
-      # 15. SUBIR REGISTROS DE DIAGNOSTICO
-      # ================================================
+      # ==========================================
+      # 17. SUBIR DIAGNOSTICOS
+      # ==========================================
 
-      - name: Upload diagnostic logs
+      - name: Upload diagnostic files
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: epanet-ui-macos-arm64-diagnostics
           path: |
-            ${{ runner.temp }}/lazarus-components/
             ${{ runner.temp }}/native-deps/
+            ${{ runner.temp }}/lazarus-components/
+            ${{ runner.temp }}/proj-symbols.txt
           if-no-files-found: ignore
           retention-days: 7
 
-      # ================================================
-      # 16. SUBIR APLICACION FINAL
-      # ================================================
+      # ==========================================
+      # 18. SUBIR APLICACION FINAL
+      # ==========================================
 
       - name: Upload macOS application
         if: success()
