@@ -407,14 +407,13 @@ jobs:
 
           file bin/mac/libshp.dylib
           lipo -archs bin/mac/libshp.dylib | grep -q arm64
+          
 
       # 13. COMPILAR PROJ
-
       - name: Build PROJ 7.2.1 ARM64
         shell: bash
         run: |
           set -euxo pipefail
-
           DEPS="$RUNNER_TEMP/native-deps"
 
           PROJ_SOURCE="$DEPS/src/proj-$PROJ_VERSION"
@@ -450,30 +449,67 @@ jobs:
           cmake --install "$PROJ_BUILD" \
             --config Release
 
+          echo "=== Verificar biblioteca PROJ ==="
+
           PROJ_DYLIB="$(find "$PROJ_INSTALL/lib" \
-            -type f -name 'libproj*.dylib' \
+            \( -type f -o -type l \) \
+            -name 'libproj*.dylib' \
             -print -quit)"
 
           if [[ -z "$PROJ_DYLIB" ]]; then
-            echo "::error::No se generó libproj."
+            echo "::error::No se generó libproj.dylib."
             find "$PROJ_INSTALL" -type f -print
             exit 1
           fi
 
           cp -L "$PROJ_DYLIB" "$DEPS/lib/libproj.dylib"
 
-          PROJ_DB="$(find "$PROJ_SOURCE" \
-            -name proj.db -print -quit)"
+          file "$DEPS/lib/libproj.dylib"
+          lipo -archs "$DEPS/lib/libproj.dylib" | grep -q arm64
 
+          echo "=== Localizar proj.db ==="
+
+          PROJ_DB=""
+
+          # Primera ubicación: instalación de PROJ.
+          if [[ -f "$PROJ_INSTALL/share/proj/proj.db" ]]; then
+            PROJ_DB="$PROJ_INSTALL/share/proj/proj.db"
+          fi
+
+          # Segunda ubicación: directorio de compilación.
+          if [[ -z "$PROJ_DB" && -f "$PROJ_BUILD/data/proj.db" ]]; then
+            PROJ_DB="$PROJ_BUILD/data/proj.db"
+          fi
+
+          # Tercera ubicación: búsqueda en los directorios disponibles.
           if [[ -z "$PROJ_DB" ]]; then
+            PROJ_DB="$(find "$PROJ_INSTALL" "$PROJ_BUILD" \
+              -type f -name proj.db -print -quit 2>/dev/null || true)"
+          fi
+
+          if [[ -z "$PROJ_DB" || ! -f "$PROJ_DB" ]]; then
             echo "::error::No se encontró proj.db."
+
+            echo "Contenido de PROJ_INSTALL:"
+            find "$PROJ_INSTALL" -maxdepth 5 -print || true
+
+            echo "Contenido de PROJ_BUILD:"
+            find "$PROJ_BUILD" -maxdepth 5 -print || true
+
             exit 1
           fi
 
-          cp "$PROJ_DB" "$DEPS/lib/proj.db"
+          echo "Base de datos localizada:"
+          ls -lh "$PROJ_DB"
 
-          file "$DEPS/lib/libproj.dylib"
-          lipo -archs "$DEPS/lib/libproj.dylib" | grep -q arm64
+          cp -f "$PROJ_DB" "$DEPS/lib/proj.db"
+
+          test -s "$DEPS/lib/proj.db"
+
+          echo "PROJ_DB=$DEPS/lib/proj.db" >> "$GITHUB_ENV"
+          echo "PROJ_INSTALL=$PROJ_INSTALL" >> "$GITHUB_ENV"
+
+          echo "PROJ compilado y verificado correctamente."
 
       # 14. PREPARAR BIBLIOTECAS
 
